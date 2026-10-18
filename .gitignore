@@ -1,0 +1,44 @@
+# Raw design data — too large for GitHub (8 GB)
+data/
+
+# Model checkpoints and training results — too large (7 GB)
+src/results/
+
+# Python virtual environment
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Preprocessed data caches
+preprocessed/
+preprocessed_v3_test/
+paper_preprocessed_data/
+
+# Temporary and personal files
+*.rar
+r1.txt
+r2.txt
+out_cert2.txt
+out_front.txt
+out_inspect.txt
+out_noc.txt
+out_scan.txt
+progress.md
+
+# Claude internal
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Large binary deliverables (keep the PDF but ignore the huge report docx if >25MB)
+*.tmp

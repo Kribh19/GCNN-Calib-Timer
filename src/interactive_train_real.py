@@ -1,0 +1,834 @@
+"""
+interactive_train_real.py
+===========================
+Interactive Timing-GNN trainer on real OpenROAD designs.
+Reproduces Run J (AT=0.9976 baseline) with three targeted improvements:
+
+  1. 11 node features (reverted from 12 -- spef_cap_norm dropped)
+  2. Three quality masks:
+       slew_real_mask   -- only LUT-propagated pins with non-trivial LUT (not all-zero)
+       net_trusted_mask -- only net edges whose SDF delay is NOT the 0.02 fallback
+       cell_lut_mask    -- only cell arcs whose LUT table has meaningful values (max > 0)
+  3. Masked loss:
+       L = 1*AT + 10*L_slew[slew_real_mask] + 10*L_net[net_trusted_mask] + 2*L_cell[cell_lut_mask]
+
+Node features:  11  (x, y, is_PI, is_IN, is_OUT,
+                     dist_left, dist_right, dist_bottom, dist_top,
+                     is_endpoint, fanout_norm)
+Net edge feats:  4  (dx, dy, manhattan, fanout_norm)
+"""
+import os
+import time
+import copy
+import random
+import torch
+import numpy as np
+from collections import deque
+
+from parse_real_design import build_graph
+from gnn_model import ModelConfig, TimingGNN
+from results_logger import ResultLogger
+from parse_liberty import get_liberty_db, get_lut_for_arc
+
+TECHLIB_DIR = r"C:\Krish\GCNN\data\techlib"
+_LIB_DB = None
+
+NODE_FEATURES = 12   # EXACT -- enforced by assertion in real_graph_to_tensors
+# Feature 11 (input_delay_norm) added after confirming primary-input pins
+# are structurally never an edge sink (parse_real_design.py's signal_driver
+# vs signal_sinks split), so the model previously had zero information --
+# and zero mechanism, see gnn_model.py's AT init fix -- to predict anything
+# but exactly 0 for a PI's arrival time, even when its SDC set_input_delay
+# was nonzero (confirmed: uni_counter4b uniformly 2.0ns, xtea uniformly
+# 5.206ns). This feature gives the model the real constraint value directly.
+
+def _get_lib_db():
+    global _LIB_DB
+    if _LIB_DB is None:
+        try:
+            _LIB_DB = get_liberty_db(TECHLIB_DIR, corner="ff")
+            print(f"[liberty] loaded {len(_LIB_DB)} cell arcs from techlib")
+        except Exception as e:
+            print(f"[liberty] WARNING: could not load liberty db: {e} -- using zeros")
+            _LIB_DB = {}
+    return _LIB_DB
+
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE.type == "cuda":
+    print(f"GPU detected: {torch.cuda.get_device_name(0)} -- training will run on GPU.")
+else:
+    print("No GPU detected -- training will run on CPU.")
+
+
+# ======================================================================
+# real-graph -> tensor conversion
+# ======================================================================
+def real_graph_to_tensors(g, gate_types, canvas_scale=1000.0):
+    pins         = g["pins"]
+    N            = len(pins)
+    endpoint_set = g.get("endpoint_set", set())
+    clock_period = g.get("clock_period", None)
+
+    fanout_count = {}
+    for d, s in g["net_edges"]:
+        fanout_count[d] = fanout_count.get(d, 0) + 1
+
+    die_w = pins[0].get("die_w", 1000.0) if pins else 1000.0
+    die_h = pins[0].get("die_h", 1000.0) if pins else 1000.0
+
+    # Real per-port set_input_delay from the SDC (pin_idx -> ns). Only
+    # primary-input pins will typically have an entry; everything else
+    # gets 0.0, which is also the correct value for internal/gate pins
+    # (they have no SDC input-delay constraint of their own).
+    true_input_delay = g.get("true_input_delay", {})
+    INPUT_DELAY_NORM_SCALE = 10.0   # rough scale match to clock periods seen (0.28-26ns)
+
+    # ── Node features: 12 dimensions ────────────────────────────────────
+    # 0:  x / canvas_scale
+    # 1:  y / canvas_scale
+    # 2:  is_PI
+    # 3:  is_IN
+    # 4:  is_OUT
+    # 5:  dist_left   / die_w
+    # 6:  dist_right  / die_w
+    # 7:  dist_bottom / die_h
+    # 8:  dist_top    / die_h
+    # 9:  is_endpoint
+    # 10: fanout_norm (sinks / 10)
+    # 11: input_delay_norm (real SDC set_input_delay, 0.0 if none)
+    x = torch.tensor([[
+        p["x"] / canvas_scale,
+        p["y"] / canvas_scale,
+        float(p["kind"] == "PI"),
+        float(p["kind"] == "IN"),
+        float(p["kind"] == "OUT"),
+        p.get("dist_left",   0.0) / max(die_w, 1.0),
+        p.get("dist_right",  0.0) / max(die_w, 1.0),
+        p.get("dist_bottom", 0.0) / max(die_h, 1.0),
+        p.get("dist_top",    0.0) / max(die_h, 1.0),
+        float(i in endpoint_set),
+        fanout_count.get(i, 0) / 10.0,
+        true_input_delay.get(i, 0.0) / INPUT_DELAY_NORM_SCALE,
+    ] for i, p in enumerate(pins)], dtype=torch.float)
+
+    # Hard guard -- catches any future accidental feature additions immediately
+    assert x.shape[1] == NODE_FEATURES, \
+        f"[BUG] Node feature dim = {x.shape[1]}, expected {NODE_FEATURES}"
+    print(f"  g[x].shape[1] = {x.shape[1]}  ✓")
+
+    ns = torch.tensor([d for d, _ in g["net_edges"]], dtype=torch.long)
+    nd = torch.tensor([s for _, s in g["net_edges"]], dtype=torch.long)
+    cs = torch.tensor([i for i, _ in g["cell_edges"]], dtype=torch.long)
+    cd = torch.tensor([o for _, o in g["cell_edges"]], dtype=torch.long)
+
+    geo = []
+    for d, s in g["net_edges"]:
+        dx          = (pins[s]["x"] - pins[d]["x"]) / canvas_scale
+        dy          = (pins[s]["y"] - pins[d]["y"]) / canvas_scale
+        manhattan   = abs(dx) + abs(dy)
+        fanout_norm = fanout_count.get(d, 1) / 10.0
+        geo.append([dx, dy, manhattan, fanout_norm])
+    geo = torch.tensor(geo, dtype=torch.float) if geo else torch.zeros(0, 4)
+
+    gtid = {t: i for i, t in enumerate(gate_types)}
+    oh = []
+    for i, o in g["cell_edges"]:
+        gt = g["gate_of_out"].get(o, "UNKNOWN")
+        v  = [0.0] * len(gate_types)
+        v[gtid.get(gt, gtid.get("UNKNOWN", 0))] = 1.0
+        oh.append(v)
+    gate_onehot = torch.tensor(oh, dtype=torch.float) if oh else torch.zeros(0, len(gate_types))
+
+    # ── LUT tables from liberty ─────────────────────────────────────────────
+    lut_k          = 7
+    lut_delay_list = []
+    lut_slew_list  = []
+    lib_db         = _get_lib_db()
+    cell_arc_info  = g.get("cell_arc_info", [])
+
+    for idx, (i, o) in enumerate(g["cell_edges"]):
+        if lib_db and idx < len(cell_arc_info):
+            ct, in_port, out_port = cell_arc_info[idx]
+            ld, ls = get_lut_for_arc(lib_db, ct, in_port, out_port, k=lut_k)
+        else:
+            ld = np.zeros((lut_k, lut_k), dtype=np.float32)
+            ls = np.zeros((lut_k, lut_k), dtype=np.float32)
+        lut_delay_list.append(ld)
+        lut_slew_list.append(ls)
+
+    if lut_delay_list:
+        lut_delay = torch.tensor(np.stack(lut_delay_list), dtype=torch.float)
+        lut_slew  = torch.tensor(np.stack(lut_slew_list),  dtype=torch.float)
+    else:
+        lut_delay = torch.zeros(0, lut_k, lut_k)
+        lut_slew  = torch.zeros(0, lut_k, lut_k)
+
+    # ── cell_lut_mask: arcs whose LUT table has real data (max > 0) ────────
+    # Arcs with all-zero LUT got no liberty entry -- their cd_true is SDF
+    # but we can't supervise the LUT head without real table data.
+    if len(lut_delay_list) > 0:
+        cell_lut_mask = torch.tensor(
+            [float(ld.max()) > 0 for ld in lut_delay_list], dtype=torch.bool)
+    else:
+        cell_lut_mask = torch.zeros(0, dtype=torch.bool)
+
+    # ── Topological levels (Kahn's algorithm) ───────────────────────────────
+    indeg = [0] * N
+    succ  = [[] for _ in range(N)]
+    for a, b in g["net_edges"]:
+        succ[a].append(b); indeg[b] += 1
+    for a, b in g["cell_edges"]:
+        succ[a].append(b); indeg[b] += 1
+    level = [0] * N
+    q     = deque(i for i in range(N) if indeg[i] == 0)
+    seen  = 0
+    while q:
+        u = q.popleft(); seen += 1
+        for v in succ[u]:
+            level[v] = max(level[v], level[u] + 1)
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+    if seen < N:
+        print(f"  (note: {N - seen} pins in a cycle -- given level 0)")
+    maxlvl = max(level) if level else 0
+
+    net_by_level  = {}
+    cell_by_level = {}
+    for L in range(maxlvl + 1):
+        net_by_level[L]  = torch.tensor(
+            [e for e, (_, s) in enumerate(g["net_edges"])  if level[s] == L], dtype=torch.long)
+        cell_by_level[L] = torch.tensor(
+            [e for e, (_, o) in enumerate(g["cell_edges"]) if level[o] == L], dtype=torch.long)
+
+    # ── Ground-truth AT (STA max propagation of SDF delays) ─────────────────
+    AT = [0.0] * N
+    for lvl in range(maxlvl + 1):
+        for e in net_by_level[lvl].tolist():
+            d, s    = g["net_edges"][e]
+            AT[s]   = max(AT[s], AT[d] + g["true_net_delay"].get((d, s), 0.02))
+        for e in cell_by_level[lvl].tolist():
+            i, o    = g["cell_edges"][e]
+            AT[o]   = max(AT[o], AT[i] + g["true_cell_delay"].get((i, o), 0.05))
+    # Overlay REAL per-pin AT from .at.sdf (ARRIVALTIMES block) where available.
+    # This takes priority over the SDF-delay-propagated estimate above, since
+    # it is the actual STA-computed value rather than a derived approximation.
+    # Pins with no real AT entry keep their propagated value unchanged. This
+    # was previously a silent gap: true_at_arrival was parsed and counted in
+    # parse_real_design.py's "mapped: N real AT" printout, but never actually
+    # read here -- AT_true was built purely from SDF-delay propagation
+    # regardless of whether real per-pin AT data existed.
+    true_at_arrival = g.get("true_at_arrival", {})
+    n_overlaid = 0
+    for idx, real_val in true_at_arrival.items():
+        if 0 <= idx < N:
+            AT[idx] = real_val
+            n_overlaid += 1
+    if n_overlaid:
+        print(f"  AT_true: overlaid {n_overlaid}/{N} pins with real .at.sdf values "
+              f"(remaining {N - n_overlaid} use SDF-delay propagation)")
+    AT_true = torch.tensor(AT, dtype=torch.float)
+
+    # ── Net delay labels + net_trusted_mask ─────────────────────────────────
+    # net_trusted_mask = True only for edges whose delay came from real SDF
+    # mapping, NOT from the 0.02 ns fallback default.
+    # We flag an edge as trusted if its key exists in true_net_delay dict.
+    FALLBACK_NET_DELAY = 0.02
+    nd_vals  = []
+    nd_trust = []
+    for d, s in g["net_edges"]:
+        key   = (d, s)
+        real  = key in g["true_net_delay"]
+        delay = g["true_net_delay"][key] if real else FALLBACK_NET_DELAY
+        nd_vals.append(delay)
+        nd_trust.append(real)
+    nd_true          = torch.tensor(nd_vals,  dtype=torch.float) if nd_vals  else torch.zeros(0)
+    net_trusted_mask = torch.tensor(nd_trust, dtype=torch.bool)  if nd_trust else torch.zeros(0, dtype=torch.bool)
+
+    # ── Cell delay labels ───────────────────────────────────────────────────
+    FALLBACK_CELL_DELAY = 0.05
+    cd_true = torch.tensor(
+        [g["true_cell_delay"].get((i, o), FALLBACK_CELL_DELAY) for i, o in g["cell_edges"]],
+        dtype=torch.float) if g["cell_edges"] else torch.zeros(0)
+
+    # ── Slew labels + slew_real_mask ────────────────────────────────────────
+    # slew_real_mask = True for pins whose slew came from a real (non-zero) LUT.
+    # We propagate slew through the DAG using the LUT slew tables.
+    # A pin's slew is "real" if the cell arc feeding it had a non-zero LUT.
+    # Primary inputs and net-propagated slew are NOT flagged as real.
+    SLEW_AXIS = [0.01, 0.023, 0.0531, 0.1225, 0.2823, 0.6507, 1.5]
+    LOAD_AXIS = [0.0005, 0.001, 0.002, 0.004, 0.008, 0.016, 0.032]
+
+    def interp_lut(table, slew_val, load_val):
+        import bisect
+        si = min(bisect.bisect_right(SLEW_AXIS, slew_val), 6)
+        li = min(bisect.bisect_right(LOAD_AXIS, load_val), 6)
+        return float(table[si, li])
+
+    PI_SLEW     = 0.15
+    SLEW_v      = [PI_SLEW] * N
+    slew_is_real = [False] * N   # starts False everywhere
+
+    for lvl in range(maxlvl + 1):
+        # Net edges: slew degrades with wire length (geometry heuristic)
+        # Pins after a net edge do NOT gain "real" status -- still heuristic
+        for e in net_by_level[lvl].tolist():
+            d, s     = g["net_edges"][e]
+            dx       = abs(pins[s]["x"] - pins[d]["x"])
+            dy       = abs(pins[s]["y"] - pins[d]["y"])
+            wire_len = (dx + dy) / canvas_scale
+            new_slew = SLEW_v[d] * (1.0 + 0.08 * wire_len)
+            SLEW_v[s] = max(SLEW_v[s], new_slew)
+            # slew_is_real[s] stays whatever it was -- net doesn't upgrade quality
+
+        # Cell edges: use LUT slew table
+        for e in cell_by_level[lvl].tolist():
+            i_pin, o_pin = g["cell_edges"][e]
+            in_slew      = SLEW_v[i_pin]
+            lut_s        = lut_slew_list[e]   # numpy 7x7
+
+            if lut_s.max() > 0:
+                # Real LUT data -- this is a trusted slew value
+                out_s          = interp_lut(lut_s, in_slew, LOAD_AXIS[3])
+                out_s          = max(out_s, 0.005)
+                slew_is_real[o_pin] = True     # ← mark as real
+            else:
+                # No LUT for this arc: heuristic fallback
+                out_s          = in_slew * 0.9
+                slew_is_real[o_pin] = False
+
+            SLEW_v[o_pin] = max(SLEW_v[o_pin], out_s)
+
+    SLEW_true      = torch.tensor(SLEW_v,      dtype=torch.float)
+    slew_real_mask = torch.tensor(slew_is_real, dtype=torch.bool)
+
+    # Coverage report
+    n_slew_real = slew_real_mask.sum().item()
+    n_net_real  = net_trusted_mask.sum().item() if len(net_trusted_mask) > 0 else 0
+    n_lut_real  = cell_lut_mask.sum().item()    if len(cell_lut_mask)    > 0 else 0
+    print(f"  slew_real_mask  : {n_slew_real}/{N} pins  ({100*n_slew_real/max(N,1):.1f}%)")
+    print(f"  net_trusted_mask: {n_net_real}/{len(g['net_edges'])} edges "
+          f"({100*n_net_real/max(len(g['net_edges']),1):.1f}%)")
+    print(f"  cell_lut_mask   : {n_lut_real}/{len(g['cell_edges'])} arcs  "
+          f"({100*n_lut_real/max(len(g['cell_edges']),1):.1f}%)")
+
+    slew_std = SLEW_true.std().item()
+    if slew_std < 1e-4:
+        print(f"  [warning] SLEW_true has very low variance ({slew_std:.2e})")
+
+    # ── Endpoints and slack ──────────────────────────────────────────────────
+    endpoints = (torch.tensor(sorted(endpoint_set), dtype=torch.long)
+                 if endpoint_set else torch.arange(N))
+
+    true_at_rat = g.get("true_at_rat", {})
+    if true_at_rat:
+        rat_vals   = [true_at_rat.get(i, clock_period or 10.0) for i in range(N)]
+        slack_true = torch.tensor([rat_vals[i] - AT[i] for i in range(N)], dtype=torch.float)
+        slack_type = "real_rat"
+        print(f"  slack: real RAT from .at.sdf ({len(true_at_rat)} pins)")
+    elif clock_period is not None:
+        slack_true = torch.tensor([clock_period - AT[i] for i in range(N)], dtype=torch.float)
+        slack_type = "real"
+    else:
+        worst_at   = AT_true[endpoints].max().item()
+        slack_true = torch.tensor([worst_at - AT[i] for i in range(N)], dtype=torch.float)
+        slack_type = "proxy"
+
+    # Per-node topological level, as a tensor. Was already computed above
+    # (used for net_by_level/cell_by_level grouping) but never surfaced.
+    # Needed for level-encoding (ADR-001 Option D): PreRoutGNN (AAAI 2024,
+    # same research lineage as this project's DAC 2022 baseline) diagnosed
+    # signal decay / error accumulation vs. topological level in TimingGCN,
+    # and fixed it with an explicit level encoding -- this exposes the raw
+    # ingredient for that fix.
+    pin_level = torch.tensor(level, dtype=torch.long)
+
+    return {
+        "x": x, "net_src": ns, "net_dst": nd, "cell_src": cs, "cell_dst": cd,
+        "edge_geo": geo, "gate_onehot": gate_onehot,
+        "lut_delay": lut_delay, "lut_slew": lut_slew,
+        "levels": list(range(maxlvl + 1)),
+        "net_by_level": net_by_level, "cell_by_level": cell_by_level,
+        "pin_level": pin_level,
+        "AT_true": AT_true, "SLEW_true": SLEW_true,
+        "nd_true": nd_true, "cd_true": cd_true,
+        "slack_true": slack_true, "slack_type": slack_type,
+        "endpoints": endpoints,
+        # ── three quality masks ────────────────────────────────────────────
+        "slew_real_mask":    slew_real_mask,    # [N]            bool
+        "net_trusted_mask":  net_trusted_mask,  # [num_net_edges] bool
+        "cell_lut_mask":     cell_lut_mask,     # [num_cell_edges] bool
+        # ── stats ─────────────────────────────────────────────────────────
+        "n_nodes": N,
+        "n_net_edges":  len(g["net_edges"]),
+        "n_cell_edges": len(g["cell_edges"]),
+    }
+
+
+def move_to_device(g, device):
+    out = {}
+    for k, v in g.items():
+        if torch.is_tensor(v):
+            out[k] = v.to(device)
+        elif isinstance(v, dict):
+            out[k] = {lvl: t.to(device) for lvl, t in v.items()}
+        else:
+            out[k] = v
+    return out
+
+
+def r2(pred, true):
+    if len(true) == 0:
+        return float("nan")
+    ss_res = ((pred - true) ** 2).sum()
+    ss_tot = ((true - true.mean()) ** 2).sum()
+    if ss_tot < 1e-8:
+        return float("nan")
+    return (1 - ss_res / ss_tot).item()
+
+
+def relative_slack(AT, endpoints):
+    ep_at = AT[endpoints]
+    return ep_at.max() - ep_at
+
+
+# ======================================================================
+# interactive prompts (identical to interactive_train_real6.py)
+# ======================================================================
+def ask(prompt, default):
+    raw = input(f"{prompt} [default {default}]: ").strip()
+    return raw if raw else str(default)
+
+def ask_int(prompt, default):   return int(ask(prompt, default))
+def ask_float(prompt, default): return float(ask(prompt, default))
+
+def ask_yesno(prompt, default=True):
+    d   = "Y/n" if default else "y/N"
+    raw = input(f"{prompt} [{d}]: ").strip().lower()
+    return default if not raw else raw.startswith("y")
+
+def ask_choice(prompt, options, default):
+    print(prompt)
+    for i, opt in enumerate(options):
+        print(f"    {i+1}. {opt}{' (default)' if opt == default else ''}")
+    raw = input(f"  choose 1-{len(options)} [default {default}]: ").strip()
+    return default if not raw else options[int(raw) - 1]
+
+
+def discover_designs(data_dir):
+    found = []
+    if not os.path.isdir(data_dir):
+        return found
+    for name in sorted(os.listdir(data_dir)):
+        folder = os.path.join(data_dir, name)
+        if not os.path.isdir(folder): continue
+        v_ok   = os.path.exists(os.path.join(folder, f"{name}.synthesis_preroute.v"))
+        sdf_ok = os.path.exists(os.path.join(folder, f"{name}.sdf"))
+        def_ok = any(f.endswith(".def") for f in os.listdir(folder))
+        if v_ok and def_ok and sdf_ok:
+            found.append((name, "OK"))
+    return found
+
+
+def pick_design(designs, prompt, exclude_list=None):
+    exclude_list = exclude_list or []
+    options      = [n for n, _ in designs if n not in exclude_list]
+    if not options:
+        return ask(prompt, "")
+    print(f"\n{prompt}")
+    for i, name in enumerate(options):
+        print(f"    {i+1}. {name}")
+    print(f"    {len(options)+1}. (type manually)")
+    raw = input(f"  choose 1-{len(options)+1}: ").strip()
+    if not raw: return options[0]
+    idx = int(raw)
+    if idx == len(options) + 1:
+        return ask("Design folder name", "")
+    return options[idx - 1]
+
+
+def build_data_settings(default_data_dir, prev_trains=None, prev_test="usb"):
+    print("\n" + "=" * 60)
+    print(" DATA")
+    print("=" * 60)
+    data_dir = ask("Path to folder containing your design subfolders", default_data_dir)
+    designs  = discover_designs(data_dir)
+    if designs:
+        print(f"\nFound {len(designs)} valid design folder(s):")
+        for name, _ in designs:
+            print(f"    {name}")
+    train_designs = []
+    print("\nSelect TRAIN designs.")
+    while True:
+        chosen = (pick_design(designs, f"Add TRAIN design #{len(train_designs)+1}",
+                              exclude_list=train_designs)
+                  if designs else ask(f"TRAIN #{len(train_designs)+1}", ""))
+        train_designs.append(chosen)
+        if len(train_designs) >= len(designs) - 1: break
+        if not ask_yesno(f"  Added '{chosen}'. Add another?", default=False): break
+    print(f"\nTRAIN designs: {train_designs}")
+    test_design = (pick_design(designs, "TEST design (unseen)", exclude_list=train_designs)
+                   if designs else ask("TEST design", prev_test))
+    return data_dir, train_designs, test_design
+
+
+def build_config_interactively():
+    print("\n" + "=" * 60)
+    print(" CONFIGURE THE MODEL ARCHITECTURE")
+    print("=" * 60)
+    hidden_dim          = ask_int("Hidden dimension", 32)
+    net_layers          = ask_int("Net Embedding layers", 3)
+    aggregation         = ask_choice("Aggregation method",
+                                     ["sum_max", "mean", "sum", "max", "attention"], "sum_max")
+    lut_k               = ask_int("LUT grid resolution (7 = matches liberty)", 7)
+    cell_correction     = ask_yesno("Use learned cell correction?", True)
+    weight_decay        = ask_float("Weight decay", 1e-4)
+    early_stop_patience = ask_int("Early stopping patience", 25)
+
+    cfg = ModelConfig(hidden_dim=hidden_dim, net_layers=net_layers,
+                      aggregation=aggregation, lut_k=lut_k,
+                      cell_correction=cell_correction)
+    cfg.weight_decay        = weight_decay
+    cfg.early_stop_patience = early_stop_patience
+    return cfg
+
+
+def build_training_settings():
+    print("\n" + "=" * 60)
+    print(" TRAINING SETTINGS")
+    print("=" * 60)
+    epochs    = ask_int("Training epochs", 300)
+    lr        = ask_float("Learning rate", 2e-3)
+    log_every = ask_int("Log every N epochs", max(1, epochs // 10))
+    return epochs, lr, log_every
+
+
+# ======================================================================
+# Main training run
+# ======================================================================
+def run_one_config(cfg, data_dir, train_designs, test_design, epochs, lr, log_every):
+    if isinstance(train_designs, str):
+        train_designs = [train_designs]
+
+    run_name = f"{'_'.join(train_designs)}_train_{test_design}_test"
+    logger   = ResultLogger(run_name=run_name, cfg=cfg,
+                            extra_info={"train_designs": train_designs,
+                                        "test_design": test_design,
+                                        "epochs_requested": epochs,
+                                        "learning_rate": lr,
+                                        "node_features": NODE_FEATURES})
+
+    print(f"\nParsing test design: {test_design}...")
+    test_raw = build_graph(os.path.join(data_dir, test_design), test_design)
+
+    train_raws = []
+    for td in train_designs:
+        print(f"Parsing train design: {td}...")
+        train_raws.append((td, build_graph(os.path.join(data_dir, td), td)))
+
+    all_gate_types = set(test_raw["gate_of_out"].values())
+    for _, tr in train_raws:
+        all_gate_types |= set(tr["gate_of_out"].values())
+    shared_gate_types = sorted(all_gate_types) or ["UNKNOWN"]
+    if "UNKNOWN" not in shared_gate_types:
+        shared_gate_types.append("UNKNOWN")
+    print(f"\nShared gate vocabulary: {len(shared_gate_types)} types")
+
+    train_graphs = [
+        move_to_device(real_graph_to_tensors(tr, shared_gate_types), DEVICE)
+        for _, tr in train_raws
+    ]
+    test_g = move_to_device(real_graph_to_tensors(test_raw, shared_gate_types), DEVICE)
+
+    # Model uses 11 node features -- enforced by model_configurable.py
+    model    = TimingGNN(cfg, n_gates=len(shared_gate_types), in_dim=NODE_FEATURES).to(DEVICE)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"\n  Trainable parameters: {n_params:,}  (node_features={NODE_FEATURES})")
+    assert NODE_FEATURES == 11, "Expected 11 node features"
+
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode="max", factor=0.5,
+        patience=max(3, epochs // 20), verbose=False)
+    mse = torch.nn.MSELoss()
+
+    total_train_nodes = sum(g["n_nodes"] for g in train_graphs)
+    design_summary    = ", ".join(f"{td}:{g['n_nodes']}"
+                                  for (td,_), g in zip(train_raws, train_graphs))
+    print(f"\nTraining with: {cfg.describe()}")
+    print(f"  Train: {len(train_designs)} design(s), {total_train_nodes} nodes ({design_summary})")
+    print(f"  Test:  {test_design}: {test_g['n_nodes']} nodes")
+    print(f"  Epochs: {epochs}  |  patience: {cfg.early_stop_patience}\n")
+
+    last_loss        = None
+    best_test_r2     = -float("inf")
+    best_model_state = None
+    best_epoch       = 0
+    patience_counter = 0
+    stopped_early    = False
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        epoch_graphs = list(train_graphs)
+        random.shuffle(epoch_graphs)
+        total_loss = 0.0
+
+        for g in epoch_graphs:
+            out = model(g)
+
+            # ── Masked loss ─────────────────────────────────────────────────
+            # AT: always, weight 1x (main objective)
+            L_AT = mse(out["AT"], g["AT_true"])
+
+            # Slew: ONLY on real-LUT pins -- heuristic labels teach nothing
+            sm = g["slew_real_mask"]
+            if sm.sum() > 50:
+                L_slew = mse(out["SLEW"][sm], g["SLEW_true"][sm])
+            else:
+                L_slew = torch.tensor(0.0, device=out["AT"].device)
+
+            # Net delay: convert to PICOSECONDS before loss
+            # [0, 0.270 ns] -> [0, 270 ps] -- natural MLP range
+            # softplus on pred ensures positive output, smooth gradient everywhere
+            nm = g["net_trusted_mask"]
+            if nm.sum() > 0:
+                pred_nd_ps = torch.nn.functional.softplus(out["net_delay"][nm] * 1000.0)
+                true_nd_ps = g["nd_true"][nm] * 1000.0
+                L_net = mse(pred_nd_ps, true_nd_ps)
+            else:
+                L_net = torch.tensor(0.0, device=out["AT"].device)
+
+            # Cell delay: only on arcs with real liberty LUT data
+            cm = g["cell_lut_mask"]
+            if cm.sum() > 0:
+                L_cell = mse(out["cell_delay"][cm], g["cd_true"][cm])
+            else:
+                L_cell = torch.tensor(0.0, device=out["AT"].device)
+
+            # Weight net at 0.0001x: MSE(ps) is ~1e6x larger than MSE(ns)
+            # 0.0001 * MSE(ps) puts it on same order as L_AT
+            loss = L_AT + 3.0*L_slew + 0.0001*L_net + 2.0*L_cell
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            total_loss += loss.item()
+
+        last_loss = total_loss / len(train_graphs)
+
+        if epoch % log_every == 0 or epoch == 1 or epoch == epochs:
+            model.eval()
+            with torch.no_grad():
+                # train R2: per-design mean (consistent with Run J history)
+                tr_r2_at = float(np.mean([
+                    r2(model(g)["AT"][g["endpoints"]], g["AT_true"][g["endpoints"]])
+                    for g in train_graphs
+                ]))
+                te_out   = model(test_g)
+                te_r2_at = r2(te_out["AT"][test_g["endpoints"]],
+                              test_g["AT_true"][test_g["endpoints"]])
+
+            scheduler.step(te_r2_at)
+            current_lr = opt.param_groups[0]["lr"]
+
+            if te_r2_at > best_test_r2 + 1e-4:
+                best_test_r2     = te_r2_at
+                best_epoch       = epoch
+                best_model_state = copy.deepcopy(model.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
+
+            logger.log_epoch(epoch, last_loss, train_r2_AT=tr_r2_at, test_r2_AT=te_r2_at)
+            print(f"  epoch {epoch:4d} | loss {last_loss:8.4f} | "
+                  f"R2 train {tr_r2_at:6.3f} | R2 test {te_r2_at:6.3f} | "
+                  f"best {best_test_r2:.3f}@{best_epoch} | "
+                  f"lr {current_lr:.2e} | patience {patience_counter}/{cfg.early_stop_patience}")
+
+            if cfg.early_stop_patience > 0 and patience_counter >= cfg.early_stop_patience:
+                print(f"\n  [early stop] stopping at epoch {epoch}.")
+                print(f"  [early stop] restoring best weights from epoch {best_epoch} "
+                      f"(test R2 = {best_test_r2:.4f})")
+                model.load_state_dict(best_model_state)
+                stopped_early = True
+                epochs = epoch
+                break
+
+    if not stopped_early and best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"\n  [best model] restoring weights from epoch {best_epoch} "
+              f"(test R2 = {best_test_r2:.4f})")
+
+    # ── Final evaluation ─────────────────────────────────────────────────────
+    model.eval()
+    with torch.no_grad():
+        te_out = model(test_g)
+
+        # train R2 (per-design mean)
+        tr_r2_at = float(np.mean([
+            r2(model(g)["AT"][g["endpoints"]], g["AT_true"][g["endpoints"]])
+            for g in train_graphs
+        ]))
+
+        # AT
+        te_r2_at = r2(te_out["AT"][test_g["endpoints"]],
+                      test_g["AT_true"][test_g["endpoints"]])
+
+        # Slew -- evaluate on real-LUT pins for R2, print count for diagnosis
+        sm = test_g["slew_real_mask"]
+        n_real_slew = sm.sum().item()
+        print(f"  [diag] slew_real_mask on xtea: {n_real_slew}/{test_g['n_nodes']} pins "
+              f"({100*n_real_slew/max(test_g['n_nodes'],1):.1f}%)")
+        if n_real_slew > 10:
+            pred_sl    = te_out["SLEW"][sm]
+            true_sl    = test_g["SLEW_true"][sm]
+            te_r2_slew = r2(pred_sl, true_sl)
+            slew_pred_min = pred_sl.min().item()
+            slew_pred_max = pred_sl.max().item()
+            slew_true_min = true_sl.min().item()
+            slew_true_max = true_sl.max().item()
+        else:
+            # fallback: all endpoints
+            pred_sl    = te_out["SLEW"][test_g["endpoints"]]
+            true_sl    = test_g["SLEW_true"][test_g["endpoints"]]
+            te_r2_slew = r2(pred_sl, true_sl)
+            slew_pred_min = pred_sl.min().item()
+            slew_pred_max = pred_sl.max().item()
+            slew_true_min = true_sl.min().item()
+            slew_true_max = true_sl.max().item()
+            print(f"  [diag] slew_real_mask too small -- evaluating on all endpoints")
+
+        # Net delay -- evaluate in raw ns AND ps-scale (matches training)
+        nm = test_g["net_trusted_mask"]
+        if nm.sum() > 10:
+            # raw ns for reporting
+            pred_nd      = torch.nn.functional.softplus(te_out["net_delay"][nm] * 1000.0) / 1000.0
+            true_nd      = test_g["nd_true"][nm].clamp(min=0)
+            te_r2_nd     = r2(pred_nd, true_nd)
+            # log-scale R2 for additional diagnostic
+            te_r2_nd_log = r2(torch.log1p(pred_nd * 1000.0),
+                              torch.log1p(true_nd * 1000.0))
+            nd_pred_min  = pred_nd.min().item()
+            nd_pred_max  = pred_nd.max().item()
+            nd_true_min  = true_nd.min().item()
+            nd_true_max  = true_nd.max().item()
+        else:
+            te_r2_nd = te_r2_nd_log = float("nan")
+            nd_pred_min = nd_pred_max = nd_true_min = nd_true_max = float("nan")
+
+        # Cell delay -- on LUT-valid arcs
+        cm = test_g["cell_lut_mask"]
+        if cm.sum() > 10:
+            te_r2_cd = r2(te_out["cell_delay"][cm], test_g["cd_true"][cm])
+        else:
+            te_r2_cd = r2(te_out["cell_delay"], test_g["cd_true"])
+
+        # Slack
+        slack_label = test_g.get("slack_type", "proxy")
+        if slack_label in ("real_rat", "real"):
+            ep         = test_g["endpoints"]
+            rat_ep     = test_g["slack_true"][ep] + test_g["AT_true"][ep]
+            slack_pred = rat_ep - te_out["AT"][ep]
+            slack_true = test_g["slack_true"][ep]
+        else:
+            slack_pred = relative_slack(te_out["AT"], test_g["endpoints"])
+            slack_true = test_g["slack_true"][test_g["endpoints"]]
+        te_r2_slack = r2(slack_pred, slack_true)
+
+    metrics_summary = {
+        "epochs_run": epochs, "final_loss": last_loss,
+        "train_r2_AT": tr_r2_at, "test_r2_AT": te_r2_at,
+        "test_r2_slew": te_r2_slew,
+        "test_r2_net_delay_raw": te_r2_nd,
+        "test_r2_net_delay_log": te_r2_nd_log,
+        "test_r2_cell_delay": te_r2_cd,
+        "test_r2_slack": te_r2_slack,
+    }
+    datasets = {
+        "train_designs": train_designs,
+        "train_total_nodes": total_train_nodes,
+        **{f"train_{td}_nodes": g["n_nodes"] for (td,_),g in zip(train_raws,train_graphs)},
+        "test_design": test_design, "test_nodes": test_g["n_nodes"],
+        "test_net_edges": test_g["n_net_edges"], "test_cell_edges": test_g["n_cell_edges"],
+        "shared_gate_types": shared_gate_types,
+        "node_features": NODE_FEATURES,
+    }
+    ep_idx = test_g["endpoints"]
+    test_predictions = {
+        "AT_true":    test_g["AT_true"][ep_idx].tolist(),
+        "AT_pred":    te_out["AT"][ep_idx].tolist(),
+        "slew_true":  test_g["SLEW_true"][ep_idx].tolist(),
+        "slew_pred":  te_out["SLEW"][ep_idx].tolist(),
+        "slack_true": slack_true.tolist(),
+        "slack_pred": slack_pred.tolist(),
+    }
+    run_dir = logger.save_final(metrics_summary=metrics_summary, datasets=datasets,
+                                model=model, test_predictions=test_predictions)
+
+    # ── Full metric table ────────────────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(" RESULT")
+    print("=" * 60)
+    print(f"  Train designs             : {', '.join(train_designs)}")
+    print(f"  Test design               : {test_design}")
+    print(f"  Trainable parameters      : {n_params:,}")
+    print(f"  Node features             : {NODE_FEATURES}")
+    print()
+    print(f"  ┌─ Test R2 (Arrival Time)     : {te_r2_at:.4f}")
+    print(f"  ├─ Test R2 (Cell Delay)       : {te_r2_cd:.4f}  [lut-valid arcs only]")
+    print(f"  ├─ Test R2 (Net Delay raw ns) : {te_r2_nd:.4f}  [trusted SDF edges only]")
+    print(f"  ├─ Test R2 (Net Delay log)    : {te_r2_nd_log:.4f}  [log1p(delay_ps)]")
+    print(f"  ├─ Test R2 (Slew)             : {te_r2_slew:.4f}  [real-LUT pins only]")
+    print(f"  └─ Test R2 (Slack {slack_label:8s})  : {te_r2_slack:.4f}")
+    print()
+    print(f"  Slew  -- pred [{slew_pred_min:.4f}, {slew_pred_max:.4f}] ns  |"
+          f"  true [{slew_true_min:.4f}, {slew_true_max:.4f}] ns")
+    print(f"  NetDly -- pred [{nd_pred_min:.4f}, {nd_pred_max:.4f}] ns  |"
+          f"  true [{nd_true_min:.4f}, {nd_true_max:.4f}] ns")
+    print(f"\n  Full report saved to      : {run_dir}")
+
+    return {"config": cfg.describe(), "run_dir": run_dir,
+            "n_params": n_params, **metrics_summary}
+
+
+# ======================================================================
+# Main interactive loop
+# ======================================================================
+if __name__ == "__main__":
+    print("=" * 60)
+    print(f" INTERACTIVE REAL-DATA TIMING-GNN TRAINER")
+    print(f" Node features: {NODE_FEATURES}  |  Net edge features: 4")
+    print("=" * 60)
+
+    results_log = []
+    data_dir, train_designs, test_design = r"C:\Krish\GCNN\data", ["spm"], "usb"
+
+    while True:
+        data_dir, train_designs, test_design = build_data_settings(
+            data_dir, train_designs, test_design)
+        cfg              = build_config_interactively()
+        epochs, lr, log_every = build_training_settings()
+
+        try:
+            result = run_one_config(cfg, data_dir, train_designs,
+                                    test_design, epochs, lr, log_every)
+            results_log.append(result)
+        except Exception as e:
+            import traceback
+            print(f"\n!! Run failed: {e}")
+            traceback.print_exc()
+
+        if len(results_log) > 1:
+            print("\n" + "=" * 60)
+            print(" COMPARISON ACROSS ALL RUNS THIS SESSION")
+            print("=" * 60)
+            print(f"{'#':>3} | {'config':<55} | {'test R2(AT)':>11} | {'params':>9}")
+            print("-" * 85)
+            for i, r in enumerate(results_log):
+                print(f"{i+1:>3} | {r['config']:<55} | "
+                      f"{r['test_r2_AT']:>11.4f} | {r['n_params']:>9,}")
+
+        if not ask_yesno("\nTry another configuration?", default=True):
+            break
+
+    print("\nDone. Every run's full report is under results/<run_id>/.")
