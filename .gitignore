@@ -42,3 +42,7 @@ desktop.ini
 
 # Large binary deliverables (keep the PDF but ignore the huge report docx if >25MB)
 *.tmp
+
+# v2 parsed-design cache (rebuilds in about a minute)
+src/v2/cache/
+src/v2/__pycache__/

@@ -6,6 +6,27 @@
 
 ---
 
+## v2 pipeline (2026-11-12) — target met, supersedes the runs below
+
+The runs below used a label that averaged the four timing channels (early/late × rise/fall), so their numbers are not comparable to DAC'22. v2 (`src/v2/`) predicts the four channels with a differentiable STA and a learned wire model. Details: FULL_REPORT.md section 0.
+
+| Run (`src/v2/runs/`) | What changed | test mean | test min |
+|---|---|---|---|
+| no learning, no wire | STA with zero wire cap | 0.5517 | −0.105 |
+| `103410_stage1` | wire-cap MLP | 0.9908 | 0.9698 |
+| `104245_stage1b` | arc-order fix, 3 heads | 0.9886 | 0.9590 |
+| `105041_tree` | spanning-tree Elmore prior, die-edge features | 0.9910 | 0.9842 |
+| `105610_phys` | port resistance, κ on delay only | 0.9950 | 0.9871 |
+| `110259_lef` | LEF pin positions, density features, per-channel port R | 0.9960 | 0.9889 |
+| **`110728_e2e`** | + end-to-end fine-tuning | **0.9968** | **0.9916** |
+| `111304_e2e_seed1` | seed 1 | 0.9977 | 0.9938 |
+| `112404_e2e_seed2` | seed 2 | 0.9970 | 0.9938 |
+| `112934_e2e_swap` | fit on test designs, test on train designs | 0.9575 | 0.4287 (des) |
+
+Per-design, best run: jpeg_encoder 0.9916, usbf_device 0.9959, aes192 0.9993, xtea 0.9998, spm 0.9999, y_huff 0.9944, synth_ram 0.9963.
+
+---
+
 ## Test Designs (fixed — never train on these)
 `jpeg_encoder, usbf_device, aes192, xtea, spm, y_huff, synth_ram`
 

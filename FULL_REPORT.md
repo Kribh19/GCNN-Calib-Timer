@@ -5,6 +5,72 @@
 
 ---
 
+## 0. READ FIRST — v2 pipeline (2026-11-12) supersedes everything below
+
+Sections 1–12 describe the old pipeline (`src/gnn_model.py`, `train_paper_split.py`, best 0.8988). They are kept as history. **Continue from `src/v2/`.**
+
+### 0.1 Why the old pipeline was stuck
+
+Every value in `<design>.at.sdf` is `(min::max)` = early (ff_n40C_1v95 library, min analysis) :: late (ss_100C_1v60 library, max analysis), given once for rise and once for fall. `parse_real_design.py` averaged all four into one label. Example, xtea pin `_2345_/Y`: ER 1.48, EF 1.46, LR 21.34, LF 16.15 ns → trained on ~10.1 ns. No max-propagation model can produce that value. DAC'22 predicts the four channels separately, so 0.8988 was never comparable to their 0.8957.
+
+Other faults in the old parser: no CLK→Q arcs for flip-flops (Q pins were sourceless), `SLEW_true` was a heuristic and ignored the real slews in the file, no pin capacitances, hard-coded LUT axes (load axis to 0.032 pF; real axis reaches 0.32 pF), only ff-corner tables, one output pin assumed per cell, early stopping selected on the test designs.
+
+### 0.2 v2 design
+
+Channels `[early-rise, early-fall, late-rise, late-fall]`. Arrival times come from a differentiable STA (Liberty NLDM tables with bilinear interpolation, min for early, max for late, rise/fall linked by arc sense). Only wire parasitics are learned, from placement:
+- wire cap per net = c · (spanning-tree length) · learned correction + offset (label: SPEF total cap)
+- wire delay per edge = root resistance · net cap + tree Elmore · learned correction (label: SDF INTERCONNECT)
+- effective-cap factor per arc, κ = 1/(1+(R_wire/(x0·R_drive))^γ) with a small correction (label: SDF cell delay)
+
+Training: 300 epochs of teacher-forced local losses, then 12 epochs end-to-end through the propagation on designs ≤100k pins. About 4 minutes on the RTX 3050. 50k parameters. Model selection on two held-out train designs (picorv32a, usb_cdc_core), never on test.
+
+Files (`src/v2/`): `liberty_v2.py` (both corners, table bank), `build_v2.py` (graph from at.sdf + DEF + LEF + SDC; SPEF as label only), `tree_v2.py` (spanning tree + Elmore terms), `sta_v2.py` (propagation; `python sta_v2.py <design>` runs the oracle checks), `train_v2.py`, `diag_v2.py` (swap predicted wire quantities for true ones). Runs in `src/v2/runs/`; parsed designs cached in `src/v2/cache/` (git-ignored, rebuilds in ~1 min).
+
+Run: `cd src\v2; python train_v2.py --epochs 300 --e2e_epochs 12 --tag e2e`
+
+### 0.3 Facts established from the data
+
+- True SDF delays propagated through the v2 graph reproduce true AT with R² 1.0000 on every design checked.
+- Async clear/preset arcs are not propagated by OpenSTA; they must be dropped.
+- For two arcs on one pin pair (mux select), the SDF lists negative-unate before positive-unate (reverse of Liberty order).
+- Sink slew = sqrt(driver_slew² + (k·wire_delay)²), k ≈ 2.0.
+- Output slew follows total load; delay follows the shielded (effective) load.
+- Input ports add (R · net cap) of wire delay with R ≈ 1.0 kΩ early, ≈ 2.1 kΩ late, constant across designs.
+- With true wire cap alone the pre-route STA scores 0.9994–0.9997; with no wire information 0.93–0.97 on spm/xtea/synth_ram but as low as −0.1 on large designs.
+- Remaining error is per-design wire-cap bias (−10% to +11%) and a few nets with fanout 130–250.
+
+### 0.4 Results (run `20261112_110728_e2e`, seed 0)
+
+| design | DAC'22 paper | v2 AT R² | endpoint AT R² |
+|---|---|---|---|
+| jpeg_encoder | 0.8820 | 0.9916 | 0.9759 |
+| usbf_device | 0.9252 | 0.9959 | 0.9746 |
+| aes192 | 0.8605 | 0.9993 | 0.9984 |
+| xtea | 0.9135 | 0.9998 | 0.9995 |
+| spm | 0.8975 | 0.9999 | 0.9977 |
+| y_huff | 0.9256 | 0.9944 | 0.8481 |
+| synth_ram | 0.8656 | 0.9963 | 0.6969 |
+| **mean** | **0.8957** | **0.9968** | 0.9273 |
+
+Seeds 0/1/2: test mean 0.9968 / 0.9977 / 0.9970, test min 0.9916 / 0.9938 / 0.9938.
+Custom designs (early = min(r,f), late = max(r,f) against their merged labels): uni_counter4b 0.9985, cla8b 0.9952, seq_detector 0.9999, priority_enc 0.9754.
+Swapped split (fit on the 7 test designs, test on the 14 train designs): 13 designs ≥ 0.995, `des` 0.43, mean 0.9575. `des` has one fanout-217 net with a 10 ns wire delay that placement does not reveal.
+
+### 0.5 Caveats to state whenever these numbers are reported
+
+- Primary-input arrival time and slew are taken from the labels (same as the DAC'22 code).
+- Slack is computed with the true RAT; RAT is not predicted.
+- Test designs were inspected during diagnosis; the swapped split is the cleaner generalisation evidence.
+- DAC'22 computes `r2_score(pred, truth)` over all pins; ours under that convention is the `paperR2` column and differs in the 3rd–4th decimal.
+- The DAC'23 paper (Wang et al., "Restructure-Tolerant Timing Prediction via Multimodal Fusion") has no public code that could be found.
+- Custom-design label files have rise = fall, no port entries and no RAT, and their `.sdf` is single-corner.
+
+### 0.6 Not done
+
+Conformal slack intervals on v2 predictions; RAT prediction; regenerating custom-design labels with the benchmark's OpenSTA script; updating the internship report text.
+
+---
+
 ## 1. Project Goal
 
 Build **CalibTimer** — a Graph Neural Network (GNN) that predicts pre-routing Static Timing Analysis (STA) values at the pin level before physical routing, using the SkyWater sky130hd 130nm PDK with OpenROAD Flow Scripts benchmarks.
