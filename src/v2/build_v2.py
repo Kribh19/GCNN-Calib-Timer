@@ -166,7 +166,11 @@ def pin_xy(info, pn, lef):
     return x + px, y + py
 
 
+_PORTS = r'\[get_ports\s+(?:\{\s*([^}]+?)\s*\}|([^\]\s]+))\s*\]'
+
+
 def parse_sdc(path):
+    """Clock period, set_load per output port, clock ports.  Port names may be bus bits (a[3])."""
     period, loads, clocks = None, {}, []
     if not path:
         return period, loads, clocks
@@ -174,10 +178,11 @@ def parse_sdc(path):
     m = re.search(r'create_clock\b.*?-period\s+([\d.]+)', text)
     if m:
         period = float(m.group(1))
-    for m in re.finditer(r'set_load\s+-pin_load\s+([\d.eE+-]+)\s+\[get_ports\s*\{?\s*([^\}\]]+?)\s*\}?\s*\]', text):
-        loads[norm(m.group(2))] = float(m.group(1))
-    for m in re.finditer(r'create_clock\b[^\n]*?\[get_ports\s*\{?\s*([^\}\]]+?)\s*\}?\s*\]', text):
-        clocks.append(norm(m.group(1)))
+    for m in re.finditer(r'set_load\s+-pin_load\s+([\d.eE+-]+)\s+' + _PORTS, text):
+        for name in (m.group(2) or m.group(3)).split():
+            loads[norm(name)] = float(m.group(1))
+    for m in re.finditer(r'create_clock\b[^\n]*?' + _PORTS, text):
+        clocks.extend(norm(n) for n in (m.group(1) or m.group(2)).split())
     return period, loads, clocks
 
 
@@ -217,6 +222,84 @@ def parse_spef_wirecap(path):
     return caps
 
 
+_ID = re.compile(r'[A-Za-z_][A-Za-z_0-9]*')
+
+
+def _fn_eval(fn, env):
+    """Evaluate a Liberty boolean function string for 0/1 pin values."""
+    return eval(fn.replace("!", "~").replace("*", "&").replace("+", "|"), {"__builtins__": {}}, env) & 1
+
+
+def constant_analysis(names, idx, net_src, net_dst, inst_type, cells):
+    """Propagate tie-cell constants through nets and logic.  Returns {node: 0/1} and, per
+    instance with a constant input, a function  active(in_pin, out_pin) -> (rise_ok, fall_ok)
+    giving which unateness the arc can still show (what OpenSTA's constant propagation does)."""
+    inst_pins = {}
+    for i, n in enumerate(names):
+        if "/" in n:
+            inst, pn = n.rsplit("/", 1)
+            inst_pins.setdefault(inst, {})[pn] = i
+    sinks = {}
+    for a, b in zip(net_src.tolist(), net_dst.tolist()):
+        sinks.setdefault(a, []).append(b)
+    funcs = {}
+    for inst, pins in inst_pins.items():
+        c = cells.get(inst_type.get(inst))
+        if not c:
+            continue
+        ins = [p for p, q in c["pins"].items() if q["direction"] == "input"]
+        for pn, q in c["pins"].items():
+            fn = q.get("function")
+            if fn and pn in pins and all(v in ins for v in _ID.findall(fn)):
+                funcs.setdefault(inst, []).append((pn, fn, sorted(set(_ID.findall(fn)))))
+    const, work = {}, []
+    for inst, fl in funcs.items():
+        for pn, fn, vs in fl:
+            if not vs:
+                const[inst_pins[inst][pn]] = _fn_eval(fn, {}); work.append(inst_pins[inst][pn])
+    touched = set()
+    while work:
+        u = work.pop()
+        for v in sinks.get(u, []):
+            if v not in const:
+                const[v] = const[u]; work.append(v)
+        n = names[u]
+        if "/" not in n:
+            continue
+        inst = n.rsplit("/", 1)[0]
+        touched.add(inst)
+        for pn, fn, vs in funcs.get(inst, []):
+            o = inst_pins[inst][pn]
+            if o in const or not vs:
+                continue
+            fixed = {v: const[inst_pins[inst][v]] for v in vs if inst_pins[inst].get(v) in const}
+            free = [v for v in vs if v not in fixed]
+            if len(free) > 10:
+                continue
+            vals = {_fn_eval(fn, {**fixed, **{v: (m >> k) & 1 for k, v in enumerate(free)}}) for m in range(1 << len(free))}
+            if len(vals) == 1:
+                const[o] = vals.pop(); work.append(o)
+
+    def arc_active(inst, a, b):
+        for pn, fn, vs in funcs.get(inst, []):
+            if pn != b or a not in vs:
+                continue
+            fixed = {v: const[inst_pins[inst][v]] for v in vs if v != a and inst_pins[inst].get(v) in const}
+            free = [v for v in vs if v != a and v not in fixed]
+            if len(free) > 10:
+                return True, True
+            pos = neg = False
+            for m in range(1 << len(free)):
+                env = {**fixed, **{v: (m >> k) & 1 for k, v in enumerate(free)}}
+                f0, f1 = _fn_eval(fn, {**env, a: 0}), _fn_eval(fn, {**env, a: 1})
+                pos |= f1 > f0
+                neg |= f1 < f0
+            return pos, neg
+        return True, True
+
+    return const, touched, arc_active
+
+
 def find(design_dir, design, suffixes):
     for f in sorted(os.listdir(design_dir)):
         for s in suffixes:
@@ -254,6 +337,7 @@ def build(design, lib=None, verbose=True):
     cells_E, cells_L = lib["cells"]["E"], lib["cells"]["L"]
     arc_src, arc_dst, cd, arc_sense, arc_launch, arc_tid = [], [], [], [], [], []
     seen = {}
+    arc_meta = []
     n_nolib = 0
     for inst, ctype, a, b, v in iop:
         k = seen.get((inst, a, b), 0)
@@ -262,10 +346,10 @@ def build(design, lib=None, verbose=True):
         sense, launch, ok = 2, 0, False
         for ci, cells in enumerate((cells_E, cells_L)):
             arcs = cells.get(ctype, {}).get("arcs", {}).get((a, b), [])
-            if len(arcs) > 1:
-                # OpenSTA writes the IOPATHs of one pin pair negative-unate first (measured on
-                # all mux2/mux4 variants: 0.007 ns error this way vs 0.4 ns in Liberty order)
-                arcs = sorted(arcs, key=lambda x: {"negative_unate": 0, "positive_unate": 1}.get(x["sense"], 2))
+            # OpenSTA writes the IOPATHs of one pin pair in the REVERSE of the Liberty order
+            # (measured on mux2/mux2i/mux4/xor2/xor3/xnor2/xnor3/fa/ha, OpenSTA 2.3.0 and 3.1.0:
+            # ~0.001 ns error reversed vs 0.2-1.8 ns in Liberty order)
+            arcs = arcs[::-1]
             if k < len(arcs):
                 arc = arcs[k]
                 ok = True
@@ -280,11 +364,31 @@ def build(design, lib=None, verbose=True):
             n_nolib += 1
         arc_src.append(nid(f"{inst}/{a}")); arc_dst.append(nid(f"{inst}/{b}"))
         cd.append(v); arc_sense.append(sense); arc_launch.append(launch); arc_tid.append(tids)
+        arc_meta.append((inst, a, b))
 
     N = len(names)
     lef = load_lef()
     net_src = np.array(net_src, np.int64); net_dst = np.array(net_dst, np.int64)
     arc_src = np.array(arc_src, np.int64); arc_dst = np.array(arc_dst, np.int64)
+
+    # ---- constants (tie cells): keep only the arc polarities that can still toggle ----
+    all_types = {k: v[0] for k, v in dinst.items()}      # tie cells have no SDF entry; DEF knows their type
+    all_types.update({k: v for k, v in inst_type.items() if v})
+    const, touched, arc_active = constant_analysis(names, idx, net_src, net_dst, all_types, cells_L)
+    n_const_arcs = 0
+    for k, (inst, a, b) in enumerate(arc_meta):
+        if inst not in touched or arc_launch[k] != 0:
+            continue
+        if arc_src[k] in const or arc_dst[k] in const:
+            arc_launch[k] = 3; n_const_arcs += 1
+            continue
+        pos, neg = arc_active(inst, a, b)
+        s0 = arc_sense[k]
+        keep_pos, keep_neg = pos and s0 in (0, 2), neg and s0 in (1, 2)
+        if not keep_pos and not keep_neg:
+            arc_launch[k] = 3; n_const_arcs += 1
+        elif s0 == 2 and keep_pos != keep_neg:
+            arc_sense[k] = 0 if keep_pos else 1; n_const_arcs += 1
 
     # ---- per-pin attributes ----
     xy = np.zeros((N, 2), np.float32)
@@ -379,7 +483,7 @@ def build(design, lib=None, verbose=True):
     }
     if verbose:
         print(f"[{design}] pins={N} net_edges={len(net_src)} cell_arcs={len(arc_src)} "
-              f"levels={int(level.max()) + 1} cyc={n_cyc} no_lib_arc={n_nolib} no_xy={n_noxy} "
+              f"levels={int(level.max()) + 1} cyc={n_cyc} no_lib_arc={n_nolib} no_xy={n_noxy} const_pins={len(const)} const_arcs={n_const_arcs} "
               f"AT_valid={np.isfinite(AT).all(1).mean():.3f} wirecap_lab={np.isfinite(wirecap).sum()} "
               f"period={period} ({time.time() - t0:.1f}s)")
     return g

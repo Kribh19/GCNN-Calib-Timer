@@ -69,6 +69,14 @@ Swapped split (fit on the 7 test designs, test on the 14 train designs): 13 desi
 
 Conformal slack intervals on v2 predictions; RAT prediction; regenerating custom-design labels with the benchmark's OpenSTA script; updating the internship report text.
 
+### 0.7 Later fixes, final run and calibration (2026-11-13)
+
+- Parser: SDF lists the arcs of one pin pair in the REVERSE of the Liberty order (measured on mux2/mux2i/mux4/xor2/xor3/xnor2/xnor3/fa/ha); tie-cell constants are propagated and only arcs that can still switch are kept (this made gcd usable); `set_load` on bus-named ports is parsed.
+- `regen_labels.py` regenerates a design's `.at.sdf` with OpenSTA in the benchmark flow; checked on xtea (arrival R2 0.99994 against the benchmark file). Custom designs were regenerated this way.
+- Final run `20261112_152424_final`: test mean AT R2 0.9966 (min 0.9918); custom designs 0.9979 to 0.9999; 51,677 parameters.
+- Calibration: `conformal_v2.py`; six models each leaving two training designs out (`--holdout`); design-level half-width 2.99 ns. It finds all 9,580 true setup violations on the test designs and flags 20,159 endpoint values. A pooled interval of 0.91 ns does not hold per design.
+- `eval_v2.py [run] [train]` writes the test (or training) tables and per-pin CSVs; the CSVs are git-ignored (hundreds of MB).
+
 ---
 
 ## 1. Project Goal

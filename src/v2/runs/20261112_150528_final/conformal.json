@@ -1,0 +1,244 @@
+{
+ "alpha": 0.1,
+ "delta": 0.2,
+ "calibration": {
+  "mode": "abs",
+  "c": 0.0,
+  "q_pin": 0.9880695343017578,
+  "q_design": 3.224837064743042,
+  "width": 6.449676513671875,
+  "per_design": {
+   "blabla": 0.395281583070755,
+   "usb": 0.08379747718572617,
+   "BM64": 3.224837064743042,
+   "zipdiv": 0.10524101555347443,
+   "salsa20": 2.8120932579040527,
+   "cic_decimator": 0.10503292083740234,
+   "aes128": 0.9665570259094238,
+   "wbqspiflash": 0.11982522904872894,
+   "aes256": 0.9796109795570374,
+   "genericfir": 0.39490628242492676,
+   "des": 10.829280853271484,
+   "aes_cipher": 0.4735046625137329
+  }
+ },
+ "final_run": "C:\\Krish\\GCNN\\src\\v2\\runs\\20261112_150528_final",
+ "designs": {
+  "jpeg_encoder": {
+   "endpoints": 17550,
+   "pin": {
+    "coverage": 0.6960114240646362,
+    "mean_width_ns": 1.9761394262313843
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449676036834717
+   },
+   "slack": {
+    "true_violations": 5367,
+    "pred_violations": 4815,
+    "flagged": 7020,
+    "true_caught": 5367,
+    "point_pred_caught": 4806
+   }
+  },
+  "usbf_device": {
+   "endpoints": 9142,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761393070220947
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449676513671875
+   },
+   "slack": {
+    "true_violations": 229,
+    "pred_violations": 201,
+    "flagged": 4591,
+    "true_caught": 229,
+    "point_pred_caught": 201
+   }
+  },
+  "aes192": {
+   "endpoints": 24880,
+   "pin": {
+    "coverage": 0.9974276423454285,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449676036834717
+   },
+   "slack": {
+    "true_violations": 3915,
+    "pred_violations": 3931,
+    "flagged": 6168,
+    "true_caught": 3915,
+    "point_pred_caught": 3914
+   }
+  },
+  "xtea": {
+   "endpoints": 896,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761393070220947
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449675559997559
+   },
+   "slack": {
+    "true_violations": 23,
+    "pred_violations": 22,
+    "flagged": 62,
+    "true_caught": 23,
+    "point_pred_caught": 22
+   }
+  },
+  "spm": {
+   "endpoints": 258,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449673175811768
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "y_huff": {
+   "endpoints": 6154,
+   "pin": {
+    "coverage": 0.9964250922203064,
+    "mean_width_ns": 1.9761388301849365
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449675559997559
+   },
+   "slack": {
+    "true_violations": 46,
+    "pred_violations": 32,
+    "flagged": 3294,
+    "true_caught": 46,
+    "point_pred_caught": 29
+   }
+  },
+  "synth_ram": {
+   "endpoints": 4484,
+   "pin": {
+    "coverage": 0.9997769594192505,
+    "mean_width_ns": 1.976138949394226
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449675559997559
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "uni_counter4b": {
+   "endpoints": 26,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449674129486084
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 2,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "cla8b": {
+   "endpoints": 20,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449673652648926
+   },
+   "slack": {
+    "true_violations": 20,
+    "pred_violations": 15,
+    "flagged": 20,
+    "true_caught": 20,
+    "point_pred_caught": 15
+   }
+  },
+  "seq_detector": {
+   "endpoints": 32,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449673652648926
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "priority_enc": {
+   "endpoints": 8,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761390686035156
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449673652648926
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 8,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "gcd": {
+   "endpoints": 176,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.9761391878128052
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 6.449673652648926
+   },
+   "slack": {
+    "true_violations": 170,
+    "pred_violations": 170,
+    "flagged": 170,
+    "true_caught": 170,
+    "point_pred_caught": 170
+   }
+  }
+ }
+}

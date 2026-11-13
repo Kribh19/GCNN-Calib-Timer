@@ -1,0 +1,244 @@
+{
+ "alpha": 0.1,
+ "delta": 0.2,
+ "calibration": {
+  "mode": "abs",
+  "c": 0.0,
+  "q_pin": 0.9071569442749023,
+  "q_design": 2.9946837425231934,
+  "width": 5.989366054534912,
+  "per_design": {
+   "blabla": 0.47261229157447815,
+   "usb": 0.05680873245000839,
+   "BM64": 2.9946837425231934,
+   "zipdiv": 0.08595271408557892,
+   "salsa20": 2.8160762786865234,
+   "cic_decimator": 0.09550619125366211,
+   "aes128": 0.9694343209266663,
+   "wbqspiflash": 0.10872993618249893,
+   "aes256": 0.8631072044372559,
+   "genericfir": 0.3129440248012543,
+   "des": 11.072619438171387,
+   "aes_cipher": 0.4631759524345398
+  }
+ },
+ "final_run": "C:\\Krish\\GCNN\\src\\v2\\runs\\20261112_152424_final",
+ "designs": {
+  "jpeg_encoder": {
+   "endpoints": 17550,
+   "pin": {
+    "coverage": 0.6598290801048279,
+    "mean_width_ns": 1.8143140077590942
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989366054534912
+   },
+   "slack": {
+    "true_violations": 5367,
+    "pred_violations": 4883,
+    "flagged": 6901,
+    "true_caught": 5367,
+    "point_pred_caught": 4873
+   }
+  },
+  "usbf_device": {
+   "endpoints": 9142,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989365577697754
+   },
+   "slack": {
+    "true_violations": 229,
+    "pred_violations": 200,
+    "flagged": 4269,
+    "true_caught": 229,
+    "point_pred_caught": 200
+   }
+  },
+  "aes192": {
+   "endpoints": 24880,
+   "pin": {
+    "coverage": 0.9968247413635254,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.98936653137207
+   },
+   "slack": {
+    "true_violations": 3915,
+    "pred_violations": 3930,
+    "flagged": 5866,
+    "true_caught": 3915,
+    "point_pred_caught": 3914
+   }
+  },
+  "xtea": {
+   "endpoints": 896,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143137693405151
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.9893670082092285
+   },
+   "slack": {
+    "true_violations": 23,
+    "pred_violations": 22,
+    "flagged": 61,
+    "true_caught": 23,
+    "point_pred_caught": 22
+   }
+  },
+  "spm": {
+   "endpoints": 258,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367961883545
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "y_huff": {
+   "endpoints": 6154,
+   "pin": {
+    "coverage": 0.9962626099586487,
+    "mean_width_ns": 1.8143137693405151
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367485046387
+   },
+   "slack": {
+    "true_violations": 46,
+    "pred_violations": 32,
+    "flagged": 3062,
+    "true_caught": 46,
+    "point_pred_caught": 29
+   }
+  },
+  "synth_ram": {
+   "endpoints": 4484,
+   "pin": {
+    "coverage": 0.5223014950752258,
+    "mean_width_ns": 1.8143140077590942
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989368438720703
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "uni_counter4b": {
+   "endpoints": 26,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143137693405151
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.9893670082092285
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 1,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "cla8b": {
+   "endpoints": 20,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367961883545
+   },
+   "slack": {
+    "true_violations": 20,
+    "pred_violations": 20,
+    "flagged": 20,
+    "true_caught": 20,
+    "point_pred_caught": 20
+   }
+  },
+  "seq_detector": {
+   "endpoints": 32,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367961883545
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 0,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "priority_enc": {
+   "endpoints": 8,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367961883545
+   },
+   "slack": {
+    "true_violations": 0,
+    "pred_violations": 0,
+    "flagged": 8,
+    "true_caught": 0,
+    "point_pred_caught": 0
+   }
+  },
+  "gcd": {
+   "endpoints": 176,
+   "pin": {
+    "coverage": 1.0,
+    "mean_width_ns": 1.8143138885498047
+   },
+   "design": {
+    "coverage": 1.0,
+    "mean_width_ns": 5.989367961883545
+   },
+   "slack": {
+    "true_violations": 170,
+    "pred_violations": 170,
+    "flagged": 170,
+    "true_caught": 170,
+    "point_pred_caught": 170
+   }
+  }
+ }
+}

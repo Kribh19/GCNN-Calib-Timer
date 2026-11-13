@@ -46,3 +46,6 @@ desktop.ini
 # v2 parsed-design cache (rebuilds in about a minute)
 src/v2/cache/
 src/v2/__pycache__/
+
+# per-pin prediction CSVs (hundreds of MB; regenerate with src/v2/eval_v2.py)
+src/v2/runs/*/predictions/

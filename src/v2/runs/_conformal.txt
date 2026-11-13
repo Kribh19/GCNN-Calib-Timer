@@ -1,0 +1,25 @@
+calibration designs (12): ['BM64', 'aes128', 'aes256', 'aes_cipher', 'blabla', 'cic_decimator', 'des', 'genericfir', 'salsa20', 'usb', 'wbqspiflash', 'zipdiv']
+calibration endpoint samples: 97982
+  sigma=abs : q_pin 0.9072  q_design 2.9947  mean design-level width on calibration 5.989 ns
+  sigma=rel : q_pin 0.0621  q_design 0.2288  mean design-level width on calibration 6.855 ns
+  sigma=wire: q_pin 1.2890  q_design 21.2429  mean design-level width on calibration 26.611 ns
+chosen sigma = abs (smaller width on calibration designs)
+per-calibration-design 90% score: {'usb': 0.057, 'zipdiv': 0.086, 'cic_decimator': 0.096, 'wbqspiflash': 0.109, 'genericfir': 0.313, 'aes_cipher': 0.463, 'blabla': 0.473, 'aes256': 0.863, 'aes128': 0.969, 'salsa20': 2.816, 'BM64': 2.995, 'des': 11.073}
+
+design        set      endpts |         pin-level         |       design-level        | slack violations: true / pred / flagged(lower bound<0) / true ones caught
+                              |   coverage    width ns    |   coverage    width ns    |
+jpeg_encoder  test      17550 |      66.0%       1.814    |     100.0%       5.989    |     5367 /   4883 /   6901 /   5367 (point prediction alone caught 4873)
+usbf_device   test       9142 |     100.0%       1.814    |     100.0%       5.989    |      229 /    200 /   4269 /    229 (point prediction alone caught 200)
+aes192        test      24880 |      99.7%       1.814    |     100.0%       5.989    |     3915 /   3930 /   5866 /   3915 (point prediction alone caught 3914)
+xtea          test        896 |     100.0%       1.814    |     100.0%       5.989    |       23 /     22 /     61 /     23 (point prediction alone caught 22)
+spm           test        258 |     100.0%       1.814    |     100.0%       5.989    |        0 /      0 /      0 /      0 (point prediction alone caught 0)
+y_huff        test       6154 |      99.6%       1.814    |     100.0%       5.989    |       46 /     32 /   3062 /     46 (point prediction alone caught 29)
+synth_ram     test       4484 |      52.2%       1.814    |     100.0%       5.989    |        0 /      0 /      0 /      0 (point prediction alone caught 0)
+uni_counter4b custom       26 |     100.0%       1.814    |     100.0%       5.989    |        0 /      0 /      1 /      0 (point prediction alone caught 0)
+cla8b         custom       20 |     100.0%       1.814    |     100.0%       5.989    |       20 /     20 /     20 /     20 (point prediction alone caught 20)
+seq_detector  custom       32 |     100.0%       1.814    |     100.0%       5.989    |        0 /      0 /      0 /      0 (point prediction alone caught 0)
+priority_enc  custom        8 |     100.0%       1.814    |     100.0%       5.989    |        0 /      0 /      8 /      0 (point prediction alone caught 0)
+gcd           custom      176 |     100.0%       1.814    |     100.0%       5.989    |      170 /    170 /    170 /    170 (point prediction alone caught 170)
+test: designs with >= 90% of endpoints inside the design-level interval: 7 of 7 (target share of designs >= 80%)
+custom: designs with >= 90% of endpoints inside the design-level interval: 5 of 5 (target share of designs >= 80%)
+wrote C:\Krish\GCNN\src\v2\runs\20261112_152424_final\conformal.json

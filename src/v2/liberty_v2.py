@@ -139,6 +139,8 @@ def parse_lib(path):
                         pin["fall_cap"] = float(v)
                     elif k == "clock":
                         pin["clock"] = (v == "true")
+                    elif k == "function":
+                        pin["function"] = v
     return cells
 
 

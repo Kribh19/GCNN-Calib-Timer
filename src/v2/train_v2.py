@@ -28,7 +28,7 @@ from sta_v2 import arc_delays, prepare, propagate, r2_score, to_dev
 TEST = ["jpeg_encoder", "usbf_device", "aes192", "xtea", "spm", "y_huff", "synth_ram"]
 TRAIN = ["blabla", "usb_cdc_core", "BM64", "salsa20", "aes128", "wbqspiflash", "cic_decimator",
          "aes256", "des", "aes_cipher", "picorv32a", "zipdiv", "genericfir", "usb"]
-CUSTOM = ["uni_counter4b", "cla8b", "seq_detector", "priority_enc"]
+CUSTOM = ["uni_counter4b", "cla8b", "seq_detector", "priority_enc", "gcd"]
 OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runs")
 
 
@@ -240,6 +240,7 @@ def main():
     ap.add_argument("--val", type=str, default="picorv32a,usb_cdc_core")
     ap.add_argument("--tag", type=str, default="v2")
     ap.add_argument("--custom", action="store_true")
+    ap.add_argument("--holdout", type=str, default="", help="train designs left out of fitting (for conformal calibration)")
     ap.add_argument("--swap", action="store_true", help="robustness check: fit on the 7 test designs, test on the 14 train designs")
     args = ap.parse_args()
     global TRAIN, TEST
@@ -254,7 +255,8 @@ def main():
     VAL = [v for v in args.val.split(",") if v]
     names = TRAIN + TEST + (CUSTOM if args.custom else [])
     P = {dn: prepare(load(dn, lib), lib, torch.device("cpu")) for dn in names}
-    fit = [d for d in TRAIN if d not in VAL]
+    HOLD = [v for v in args.holdout.split(",") if v]
+    fit = [d for d in TRAIN if d not in VAL and d not in HOLD]
     G = {dn: to_dev(P[dn], dev) for dn in fit + VAL}
     FE = {dn: features(G[dn]) for dn in G}
     fn_dim, fe_dim = FE[fit[0]][0].shape[1], FE[fit[0]][1].shape[1]
@@ -335,7 +337,7 @@ def main():
            f"{'MAE ns':>7} {'slew':>7} {'wcap':>7} {'ep AT':>7} {'slack':>7} {'paperR2':>7} {'sec':>6}")
     print("\n" + hdr + "\n" + "-" * len(hdr))
     for dn in P:
-        split = "test" if dn in TEST else "val" if dn in VAL else "custom" if dn in CUSTOM else "train"
+        split = "test" if dn in TEST else "val" if dn in VAL else "custom" if dn in CUSTOM else "holdout" if dn in HOLD else "train"
         p = to_dev(P[dn], dev)
         if dev.type == "cuda":
             torch.cuda.synchronize()
@@ -365,7 +367,7 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     run = os.path.join(OUT_DIR, time.strftime("%Y%m%d_%H%M%S_") + args.tag)
     os.makedirs(run)
-    torch.save({"state_dict": model.state_dict(), "args": vars(args), "val": VAL, "fit": fit,
+    torch.save({"state_dict": model.state_dict(), "args": vars(args), "val": VAL, "fit": fit, "holdout": HOLD,
                 "fn_dim": fn_dim, "fe_dim": fe_dim}, os.path.join(run, "wirenet.pt"))
     with open(os.path.join(run, "results.json"), "w") as f:
         json.dump({"args": vars(args), "history": hist, "results": res}, f, indent=1)

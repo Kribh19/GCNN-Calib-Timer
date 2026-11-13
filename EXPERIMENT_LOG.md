@@ -25,6 +25,16 @@ The runs below used a label that averaged the four timing channels (early/late Ã
 
 Per-design, best run: jpeg_encoder 0.9916, usbf_device 0.9959, aes192 0.9993, xtea 0.9998, spm 0.9999, y_huff 0.9944, synth_ram 0.9963.
 
+### Final run and calibration (2026-11-13)
+
+Parser fixes after the table above: arc order is the reverse of the Liberty order, constants from tie cells are propagated (gcd now exact), output loads on bus-named ports are read, and the custom designs' labels were regenerated with OpenSTA in the benchmark flow.
+
+| Run | test mean | test min | custom designs |
+|---|---|---|---|
+| `152424_final` | 0.9966 | 0.9918 | 0.9979 to 0.9999 |
+
+Calibration (`conformal_v2.py`, six leave-two-out models, 12 held-out training designs): design-level half-width 2.995 ns (11th of 12), pooled half-width 0.907 ns (not valid per design). On the test designs the interval finds 9,580 of 9,580 true setup violations and flags 20,159 endpoint values.
+
 ---
 
 ## Test Designs (fixed â€” never train on these)
